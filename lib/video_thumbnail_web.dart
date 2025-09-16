@@ -1,5 +1,6 @@
 import 'dart:async';
-import 'dart:html';
+import 'dart:js_interop';
+import 'package:web/web.dart' as web;
 import 'dart:math' as math;
 
 import 'package:cross_file/cross_file.dart';
@@ -61,7 +62,7 @@ class VideoThumbnailWeb extends VideoThumbnailPlatform {
       quality: quality,
     );
 
-    return XFile(Url.createObjectUrlFromBlob(blob), mimeType: blob.type);
+    return XFile(web.URL.createObjectURL(blob), mimeType: blob.type);
   }
 
   @override
@@ -83,15 +84,15 @@ class VideoThumbnailWeb extends VideoThumbnailPlatform {
       timeMs: timeMs,
       quality: quality,
     );
-    final path = Url.createObjectUrlFromBlob(blob);
+    final path = web.URL.createObjectURL(blob);
     final file = XFile(path, mimeType: blob.type);
     final bytes = await file.readAsBytes();
-    Url.revokeObjectUrl(path);
+    web.URL.revokeObjectURL(path);
 
     return bytes;
   }
 
-  Future<Blob> _createThumbnail({
+  Future<web.Blob> _createThumbnail({
     required String videoSrc,
     required Map<String, String>? headers,
     required ImageFormat imageFormat,
@@ -100,24 +101,27 @@ class VideoThumbnailWeb extends VideoThumbnailPlatform {
     required int timeMs,
     required int quality,
   }) async {
-    final completer = Completer<Blob>();
+    final completer = Completer<web.Blob>();
 
-    final video = document.createElement('video') as VideoElement;
+    final video = web.document.createElement('video') as web.HTMLVideoElement;
     final timeSec = math.max(timeMs / 1000, 0);
     final fetchVideo = headers != null && headers.isNotEmpty;
 
-    video.onLoadedMetadata.listen((event) {
+    void onLoadedMetadata(web.Event event) {
       video.currentTime = timeSec;
 
       if (fetchVideo) {
-        Url.revokeObjectUrl(video.src);
+        web.URL.revokeObjectURL(video.src);
       }
-    });
+    }
 
-    video.onSeeked.listen((Event e) async {
+    video.addEventListener('loadedmetadata', onLoadedMetadata.toJS);
+
+    void onSeeked(web.Event e) {
       if (!completer.isCompleted) {
-        final canvas = document.createElement('canvas') as CanvasElement;
-        final ctx = canvas.getContext('2d')! as CanvasRenderingContext2D;
+        final canvas =
+            web.document.createElement('canvas') as web.HTMLCanvasElement;
+        final ctx = canvas.getContext('2d')! as web.CanvasRenderingContext2D;
 
         if (maxWidth == 0 && maxHeight == 0) {
           canvas
@@ -142,30 +146,33 @@ class VideoThumbnailWeb extends VideoThumbnailPlatform {
           canvas
             ..width = maxWidth
             ..height = maxHeight;
-          ctx.drawImageScaled(video, 0, 0, maxWidth, maxHeight);
+          ctx.drawImage(video, 0, 0, maxWidth.toDouble(), maxHeight.toDouble());
         }
 
-        try {
-          final blob = canvas.toBlob(
-            _imageFormatToCanvasFormat(imageFormat),
-            quality / 100,
-          );
-
-          completer.complete(blob);
-        } catch (e, s) {
-          completer.completeError(
-            PlatformException(
-              code: 'CANVAS_EXPORT_ERROR',
-              details: e,
-              stacktrace: s.toString(),
-            ),
-            s,
-          );
+        void blobCallback(web.Blob? blob) {
+          if (blob != null) {
+            completer.complete(blob);
+          } else {
+            completer.completeError(
+              PlatformException(
+                code: 'CANVAS_EXPORT_ERROR',
+                message: 'Failed to export canvas to blob',
+              ),
+            );
+          }
         }
+
+        canvas.toBlob(
+          blobCallback.toJS,
+          _imageFormatToCanvasFormat(imageFormat),
+          (quality / 100).toJS,
+        );
       }
-    });
+    }
 
-    video.onError.listen((Event e) {
+    video.addEventListener('seeked', onSeeked.toJS);
+
+    void onError(web.Event e) {
       // The Event itself (_) doesn't contain info about the actual error.
       // We need to look at the HTMLMediaElement.error.
       // See: https://developer.mozilla.org/en-US/docs/Web/API/HTMLMediaElement/error
@@ -180,7 +187,9 @@ class VideoThumbnailWeb extends VideoThumbnailPlatform {
           ),
         );
       }
-    });
+    }
+
+    video.addEventListener('error', onError.toJS);
 
     if (fetchVideo) {
       try {
@@ -189,7 +198,7 @@ class VideoThumbnailWeb extends VideoThumbnailPlatform {
           headers: headers,
         );
 
-        video.src = Url.createObjectUrlFromBlob(blob);
+        video.src = web.URL.createObjectURL(blob);
       } catch (e, s) {
         completer.completeError(e, s);
       }
@@ -207,29 +216,42 @@ class VideoThumbnailWeb extends VideoThumbnailPlatform {
   /// To avoid reading the video's bytes into memory, set the
   /// [HttpRequest.responseType] to 'blob'. This allows the blob to be stored in
   /// the browser's disk or memory cache.
-  Future<Blob> _fetchVideoByHeaders({
+  Future<web.Blob> _fetchVideoByHeaders({
     required String videoSrc,
     required Map<String, String> headers,
   }) async {
-    final completer = Completer<Blob>();
+    final completer = Completer<web.Blob>();
 
-    final xhr = HttpRequest()
-      ..open('GET', videoSrc, async: true)
-      ..responseType = 'blob';
-    headers.forEach(xhr.setRequestHeader);
+    final xhr = web.XMLHttpRequest();
+    xhr.open('GET', videoSrc, true);
+    xhr.responseType = 'blob';
+    headers.forEach((key, value) => xhr.setRequestHeader(key, value));
 
-    xhr.onLoad.first.then((ProgressEvent value) {
-      completer.complete(xhr.response as Blob);
-    });
+    void onLoad(web.Event event) {
+      if (xhr.response != null) {
+        completer.complete(xhr.response as web.Blob);
+      } else {
+        completer.completeError(
+          PlatformException(
+            code: 'VIDEO_FETCH_ERROR',
+            message: 'No response received',
+          ),
+        );
+      }
+    }
 
-    xhr.onError.first.then((ProgressEvent value) {
+    xhr.addEventListener('load', onLoad.toJS);
+
+    void onError(web.Event event) {
       completer.completeError(
         PlatformException(
           code: 'VIDEO_FETCH_ERROR',
           message: 'Status: ${xhr.statusText}',
         ),
       );
-    });
+    }
+
+    xhr.addEventListener('error', onError.toJS);
 
     xhr.send();
 
